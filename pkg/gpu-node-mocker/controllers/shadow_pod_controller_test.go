@@ -849,4 +849,3 @@ func TestEnsureSimConfigMap(t *testing.T) {
 		t.Fatalf("second call should be idempotent: %v", err)
 	}
 }
-
