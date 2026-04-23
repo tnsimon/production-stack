@@ -79,7 +79,6 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 IMG_TAG ?= $(VERSION)
 IMG ?= $(REGISTRY)/$(IMG_NAME):$(IMG_TAG)
 
-CONTAINER_ENGINE ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
 ARCH ?= amd64
 
 .PHONY: build
@@ -90,6 +89,8 @@ build: ## Build the gpu-node-mocker binary.
 .PHONY: test
 test: ## Run unit tests.
 	go test -v -race -count=1 ./pkg/... ./cmd/...
+
+CONTAINER_TOOL ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null || echo docker)
 
 .PHONY: docker-build
 docker-build: ## Build docker image for the target ARCH.
@@ -159,18 +160,20 @@ e2e-dump: ## Dump cluster state for debugging.
 e2e-teardown: ## Tear down the E2E cluster.
 	hack/e2e/scripts/run-e2e-local.sh teardown
 
+USER_ID ?= $(shell whoami)
+E2E_CLUSTER_NAME ?= kaito-$(USER_ID)
+E2E_RESOURCE_GROUP ?= kaito-$(USER_ID)
+
 .PHONY: e2e-up
-e2e-up: e2e-setup ## One command to set up full local E2E env (build, cluster, push, install, validate).
-	@ACR_NAME=$$(az acr list --resource-group $${RESOURCE_GROUP:-kaito-e2e-local} --query '[0].name' -o tsv) && \
-	echo "=== Building and pushing image to ACR ($$ACR_NAME) ===" && \
-	TOKEN=$$(az acr login --name "$$ACR_NAME" --expose-token --query accessToken -o tsv) && \
-	echo "$$TOKEN" | $(CONTAINER_ENGINE) login "$$ACR_NAME.azurecr.io" --username 00000000-0000-0000-0000-000000000000 --password-stdin && \
-	$(CONTAINER_ENGINE) build --platform linux/$(ARCH) -f docker/Dockerfile \
-		-t "$$ACR_NAME.azurecr.io/gpu-node-mocker:latest" . && \
-	$(CONTAINER_ENGINE) push "$$ACR_NAME.azurecr.io/gpu-node-mocker:latest" && \
-	SHADOW_CONTROLLER_IMAGE="$$ACR_NAME.azurecr.io/gpu-node-mocker:latest" $(MAKE) e2e-install
-	$(MAKE) e2e-validate
-	@echo ""
-	@echo "=== E2E environment is ready ==="
-	@echo "Run tests with: make test-e2e"
-	@echo "Tear down with: make e2e-teardown"
+e2e-up: ## One command to set up full local E2E env (cluster, build, push, install, validate).
+	@export CLUSTER_NAME=$(E2E_CLUSTER_NAME) RESOURCE_GROUP=$(E2E_RESOURCE_GROUP) && \
+	hack/e2e/scripts/run-e2e-local.sh setup && \
+	hack/e2e/scripts/run-e2e-local.sh build-push && \
+	hack/e2e/scripts/run-e2e-local.sh install && \
+	hack/e2e/scripts/run-e2e-local.sh validate && \
+	echo "" && \
+	echo "=== E2E environment is ready ===" && \
+	echo "  Cluster: $(E2E_CLUSTER_NAME)" && \
+	echo "  Resource Group: $(E2E_RESOURCE_GROUP)" && \
+	echo "Run tests with: make test-e2e" && \
+	echo "Tear down with: CLUSTER_NAME=$(E2E_CLUSTER_NAME) RESOURCE_GROUP=$(E2E_RESOURCE_GROUP) make e2e-teardown"
