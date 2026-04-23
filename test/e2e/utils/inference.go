@@ -51,6 +51,9 @@ type InferenceSetConfig struct {
 	PresetName string
 	// GatewayName is the name of the Gateway to associate HTTPRoutes with.
 	GatewayName string
+	// ModelName is the value matched in the X-Gateway-Model-Name header.
+	// Defaults to Name if empty.
+	ModelName string
 }
 
 // DefaultInferenceSetConfig returns an InferenceSetConfig with sensible defaults.
@@ -181,22 +184,26 @@ func CreateDestinationRuleForInferenceSet(ctx context.Context, cl client.Client,
 // CreateHTTPRouteForInferenceSet creates an HTTPRoute that routes requests
 // with the matching X-Gateway-Model-Name header to the InferenceSet's
 // InferencePool via the specified Gateway.
-func CreateHTTPRouteForInferenceSet(ctx context.Context, cl client.Client, name, namespace, gatewayName string) error {
-	poolName := InferencePoolName(name)
+func CreateHTTPRouteForInferenceSet(ctx context.Context, cl client.Client, cfg InferenceSetConfig) error {
+	poolName := InferencePoolName(cfg.Name)
+	modelName := cfg.ModelName
+	if modelName == "" {
+		modelName = cfg.Name
+	}
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "gateway.networking.k8s.io/v1",
 			"kind":       "HTTPRoute",
 			"metadata": map[string]interface{}{
-				"name":      name + "-route",
-				"namespace": namespace,
+				"name":      cfg.Name + "-route",
+				"namespace": cfg.Namespace,
 			},
 			"spec": map[string]interface{}{
 				"parentRefs": []interface{}{
 					map[string]interface{}{
 						"group":     "gateway.networking.k8s.io",
 						"kind":      "Gateway",
-						"name":      gatewayName,
+						"name":      cfg.GatewayName,
 						"namespace": GatewayNamespace,
 					},
 				},
@@ -208,7 +215,7 @@ func CreateHTTPRouteForInferenceSet(ctx context.Context, cl client.Client, name,
 									map[string]interface{}{
 										"type":  "Exact",
 										"name":  "X-Gateway-Model-Name",
-										"value": name,
+										"value": modelName,
 									},
 								},
 								"path": map[string]interface{}{
@@ -248,7 +255,7 @@ func CreateInferenceSetWithRouting(ctx context.Context, cl client.Client, cfg In
 		return fmt.Errorf("failed to create DestinationRule for %s: %w", cfg.Name, err)
 	}
 
-	if err := CreateHTTPRouteForInferenceSet(ctx, cl, cfg.Name, cfg.Namespace, cfg.GatewayName); err != nil {
+	if err := CreateHTTPRouteForInferenceSet(ctx, cl, cfg); err != nil {
 		return fmt.Errorf("failed to create HTTPRoute for %s: %w", cfg.Name, err)
 	}
 

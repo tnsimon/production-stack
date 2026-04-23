@@ -40,6 +40,114 @@ const (
 var modelNames = []string{falconModel, ministralModel}
 
 var _ = Describe("GPU Mocker E2E", Ordered, func() {
+	var ctx context.Context
+
+	BeforeAll(func() {
+		ctx = context.Background()
+		utils.GetClusterClient(utils.TestingCluster)
+
+		cl := utils.TestingCluster.KubeClient
+		for _, model := range modelNames {
+			cfg := utils.DefaultInferenceSetConfig(model)
+
+			By(fmt.Sprintf("Creating InferenceSet for %s", model))
+			err := utils.CreateInferenceSet(ctx, cl, cfg)
+			if err != nil && !apierrors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred(), "failed to create InferenceSet for %s", model)
+			}
+
+			By(fmt.Sprintf("Waiting for InferencePool for %s", model))
+			err = utils.WaitForInferenceSetReady(ctx, cl, cfg.Name, cfg.Namespace, utils.InferenceSetReadyTimeout)
+			Expect(err).NotTo(HaveOccurred(), "InferenceSet %s not ready", model)
+
+			By(fmt.Sprintf("Creating DestinationRule for %s", model))
+			Eventually(func() error {
+				err := utils.CreateDestinationRuleForInferenceSet(ctx, cl, cfg.Name, cfg.Namespace)
+				if apierrors.IsAlreadyExists(err) {
+					return nil
+				}
+				return err
+			}, 1*time.Minute, 5*time.Second).Should(Succeed(),
+				"failed to create DestinationRule for %s", model)
+
+			By(fmt.Sprintf("Creating HTTPRoute for %s", model))
+			Eventually(func() error {
+				err := utils.CreateHTTPRouteForInferenceSet(ctx, cl, cfg)
+				if apierrors.IsAlreadyExists(err) {
+					return nil
+				}
+				return err
+			}, 1*time.Minute, 5*time.Second).Should(Succeed(),
+				"failed to create HTTPRoute for %s", model)
+		}
+
+		// Wait for KAITO to fully reconcile: EPP pods (deployed via
+		// HelmRelease), fake nodes, shadow pods, and original pod status
+		// patching must all complete before the gateway can route traffic.
+		clientset, err := utils.GetK8sClientset()
+		Expect(err).NotTo(HaveOccurred())
+
+		for _, model := range modelNames {
+			eppName := utils.EPPServiceName(model)
+			By(fmt.Sprintf("Waiting for EPP pods for %s to be Running", model))
+			Eventually(func() error {
+				pods, err := clientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+					LabelSelector: fmt.Sprintf("inferencepool=%s", eppName),
+				})
+				if err != nil {
+					return fmt.Errorf("failed to list EPP pods: %w", err)
+				}
+				var running int
+				for _, pod := range pods.Items {
+					if pod.Status.Phase == "Running" {
+						running++
+					}
+				}
+				if running < 1 {
+					return fmt.Errorf("no running EPP pods for %q (total: %d)", eppName, len(pods.Items))
+				}
+				return nil
+			}, 5*time.Minute, 10*time.Second).Should(Succeed(),
+				"EPP pods for %s should be Running", model)
+		}
+
+		for _, model := range modelNames {
+			By(fmt.Sprintf("Waiting for inference pods for %s to be Running", model))
+			Eventually(func() error {
+				// Use the KAITO InferenceSet label to find pods.
+				pods, err := clientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+					LabelSelector: fmt.Sprintf("inferenceset.kaito.sh/created-by=%s", model),
+				})
+				if err != nil {
+					return fmt.Errorf("failed to list pods: %w", err)
+				}
+				if len(pods.Items) == 0 {
+					return fmt.Errorf("no inference pods found for %s", model)
+				}
+				for _, pod := range pods.Items {
+					if pod.Status.Phase != "Running" {
+						return fmt.Errorf("pod %s is %s, not Running", pod.Name, pod.Status.Phase)
+					}
+					if pod.Status.PodIP == "" {
+						return fmt.Errorf("pod %s has no PodIP yet", pod.Name)
+					}
+				}
+				return nil
+			}, 5*time.Minute, 10*time.Second).Should(Succeed(),
+				"inference pods for %s should be Running with PodIPs", model)
+		}
+	})
+
+	AfterAll(func() {
+		ctx = context.Background()
+		for _, model := range modelNames {
+			By(fmt.Sprintf("Cleaning up InferenceSet with routing for %s", model))
+			err := utils.CleanupInferenceSetWithRouting(ctx, utils.TestingCluster.KubeClient, model, testNamespace)
+			if err != nil {
+				GinkgoWriter.Printf("Cleanup warning for %s: %v\n", model, err)
+			}
+		}
+	})
 
 	Context("GPU Node Mocker", utils.GinkgoLabelSmoke, func() {
 
